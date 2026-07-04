@@ -1,16 +1,18 @@
 import streamlit as st
-import time
-import base64 # Added specifically for PDF preview
+import os
 
-# Configure the page
-st.set_page_config(page_title="HemeTracker_AI", layout="wide")
+# Configure the page (optional but recommended for a clean look)
+st.set_page_config(page_title="Medico-AI", layout="wide")
 
 # -----------------------------------------------------------------------------
 # UI Header & Logos
 # -----------------------------------------------------------------------------
-try:
+# Safely check for the image to prevent Streamlit's internal MediaFileStorageError
+if os.path.exists("HemeTracker_AI.png"):
+    # Ensure 'HemeTracker_AI.png' is in the same directory as your script
     st.image("HemeTracker_AI.png", use_container_width=True)
-except FileNotFoundError:
+else:
+    # Fallback title if the image is missing
     st.markdown("<h1 style='text-align: center;'>HemeTracker_AI</h1>", unsafe_allow_html=True)
 
 st.markdown("""
