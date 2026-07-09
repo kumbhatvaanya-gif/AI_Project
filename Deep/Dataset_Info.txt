@@ -1,0 +1,12 @@
+Acute lymphoblastic leukemia (ALL) is one of the most common types of blood cancer and requires accurate diagnosis for effective treatment. Conventional diagnostic methods often involve invasive, expensive, and time-consuming procedures, such as bone marrow examination and laboratory testing. Peripheral blood smear (PBS) imaging is commonly used as an initial screening tool to help distinguish between healthy and abnormal blood cells before confirmatory diagnostic tests are performed.
+
+The examination of PBS images is typically carried out by trained laboratory professionals or hematologists. However, identifying ALL can be challenging because its signs and cellular characteristics may resemble those of other blood conditions, increasing the risk of diagnostic errors. Advances in digital microscopy and medical image analysis have enabled the use of PBS images for automated and computer-assisted detection of leukemia, supporting faster and more consistent screening.
+
+PBS images are generally captured using high-magnification microscopes equipped with digital cameras after blood samples are prepared and stained using standard laboratory techniques. These images may contain both benign and malignant white blood cells, including different developmental stages of lymphoblasts associated with ALL. In many image analysis applications, preprocessing techniques such as color-based segmentation are applied to isolate the white blood cells from the background, improving the performance of subsequent classification and diagnostic models.
+
+Original peripheral blood smear images containing 3256 images from 89 patients suspected of ALL, including 25 healthy individuals with a benign diagnosis (hematogone) and 64 patients with a definitive diagnosis of ALL subtypes, Early Pre-B, Pre-B, and Pro-B ALL.
+
+
+https://www.kaggle.com/datasets/mehradaria/leukemia?select=Original
+
+Local Drive: https://drive.google.com/drive/folders/1Omn1M2VBt16w5I23dleH-PjqF2qFDKSk?usp=drive_link
