@@ -13,6 +13,172 @@ import plotly.graph_objects as go
 import streamlit as st
 from PIL import Image
 
+from datetime import datetime, timezone
+from io import BytesIO
+from pathlib import Path
+import re
+import uuid
+
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+import streamlit as st
+
+
+GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+SPREADSHEET_ID = st.secrets["google"]["spreadsheet_id"]
+DRIVE_FOLDER_ID = st.secrets["google"]["drive_folder_id"]
+
+
+@st.cache_resource
+def get_google_services():
+    service_account_info = dict(
+        st.secrets["gcp_service_account"]
+    )
+
+    credentials = (
+        Credentials.from_service_account_info(
+            service_account_info,
+            scopes=GOOGLE_SCOPES,
+        )
+    )
+
+    sheets_service = build(
+        "sheets",
+        "v4",
+        credentials=credentials,
+        cache_discovery=False,
+    )
+
+    drive_service = build(
+        "drive",
+        "v3",
+        credentials=credentials,
+        cache_discovery=False,
+    )
+
+    return sheets_service, drive_service
+
+
+sheets_service, drive_service = get_google_services()
+
+
+def utc_timestamp():
+    return datetime.now(
+        timezone.utc
+    ).isoformat()
+
+
+def append_sheet_row(tab_name, values):
+    """
+    Append one row of text/metadata to Google Sheets.
+
+    Passwords must never be included in values.
+    """
+
+    sheets_service.spreadsheets().values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"'{tab_name}'!A:Z",
+        valueInputOption="RAW",
+        insertDataOption="INSERT_ROWS",
+        body={"values": [values]},
+    ).execute()
+
+
+def get_sheet_rows(tab_name):
+    result = (
+        sheets_service.spreadsheets()
+        .values()
+        .get(
+            spreadsheetId=SPREADSHEET_ID,
+            range=f"'{tab_name}'!A:Z",
+        )
+        .execute()
+    )
+
+    values = result.get("values", [])
+
+    if len(values) < 2:
+        return []
+
+    headers = values[0]
+    records = []
+
+    for row in values[1:]:
+        padded_row = row + [""] * (
+            len(headers) - len(row)
+        )
+
+        records.append(
+            dict(zip(headers, padded_row))
+        )
+
+    return records
+
+
+def clean_filename(filename):
+    filename = Path(filename).name
+
+    return re.sub(
+        r"[^A-Za-z0-9._-]",
+        "_",
+        filename,
+    )
+
+
+def upload_image_to_drive(uploaded_file, user_id):
+    """
+    Upload an image to the configured private Drive folder.
+
+    The function does not make the image public.
+    """
+
+    safe_filename = clean_filename(
+        uploaded_file.name
+    )
+
+    drive_filename = (
+        f"{user_id}_"
+        f"{uuid.uuid4()}_"
+        f"{safe_filename}"
+    )
+
+    file_bytes = uploaded_file.getvalue()
+
+    media = MediaIoBaseUpload(
+        BytesIO(file_bytes),
+        mimetype=(
+            uploaded_file.type
+            or "application/octet-stream"
+        ),
+        resumable=True,
+    )
+
+    metadata = {
+        "name": drive_filename,
+        "parents": [DRIVE_FOLDER_ID],
+    }
+
+    result = (
+        drive_service.files()
+        .create(
+            body=metadata,
+            media_body=media,
+            fields=(
+                "id,name,mimeType,size,"
+                "createdTime,webViewLink"
+            ),
+            supportsAllDrives=True,
+        )
+        .execute()
+    )
+
+    return result
+
 
 # ==================================================
 # CONFIGURATION
