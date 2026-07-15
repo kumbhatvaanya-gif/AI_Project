@@ -1,2129 +1,551 @@
-from __future__ import annotations
-
-import hashlib
-import hmac
-import os
-import sqlite3
-import uuid
-from datetime import date
-from pathlib import Path
-
+import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import streamlit as st
-from PIL import Image
+from datetime import date, datetime
+import random
 
-from datetime import datetime, timezone
-from io import BytesIO
-from pathlib import Path
-import re
-import uuid
-
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
-import streamlit as st
-
-
-GOOGLE_SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-
-SPREADSHEET_ID = st.secrets["google"]["spreadsheet_id"]
-DRIVE_FOLDER_ID = st.secrets["google"]["drive_folder_id"]
-
-
-@st.cache_resource
-def get_google_services():
-    service_account_info = dict(
-        st.secrets["gcp_service_account"]
-    )
-
-    credentials = (
-        Credentials.from_service_account_info(
-            service_account_info,
-            scopes=GOOGLE_SCOPES,
-        )
-    )
-
-    sheets_service = build(
-        "sheets",
-        "v4",
-        credentials=credentials,
-        cache_discovery=False,
-    )
-
-    drive_service = build(
-        "drive",
-        "v3",
-        credentials=credentials,
-        cache_discovery=False,
-    )
-
-    return sheets_service, drive_service
-
-
-sheets_service, drive_service = get_google_services()
-
-
-def utc_timestamp():
-    return datetime.now(
-        timezone.utc
-    ).isoformat()
-
-
-def append_sheet_row(tab_name, values):
-    """
-    Append one row of text/metadata to Google Sheets.
-
-    Passwords must never be included in values.
-    """
-
-    sheets_service.spreadsheets().values().append(
-        spreadsheetId=SPREADSHEET_ID,
-        range=f"'{tab_name}'!A:Z",
-        valueInputOption="RAW",
-        insertDataOption="INSERT_ROWS",
-        body={"values": [values]},
-    ).execute()
-
-
-def get_sheet_rows(tab_name):
-    result = (
-        sheets_service.spreadsheets()
-        .values()
-        .get(
-            spreadsheetId=SPREADSHEET_ID,
-            range=f"'{tab_name}'!A:Z",
-        )
-        .execute()
-    )
-
-    values = result.get("values", [])
-
-    if len(values) < 2:
-        return []
-
-    headers = values[0]
-    records = []
-
-    for row in values[1:]:
-        padded_row = row + [""] * (
-            len(headers) - len(row)
-        )
-
-        records.append(
-            dict(zip(headers, padded_row))
-        )
-
-    return records
-
-
-def clean_filename(filename):
-    filename = Path(filename).name
-
-    return re.sub(
-        r"[^A-Za-z0-9._-]",
-        "_",
-        filename,
-    )
-
-
-def upload_image_to_drive(uploaded_file, user_id):
-    """
-    Upload an image to the configured private Drive folder.
-
-    The function does not make the image public.
-    """
-
-    safe_filename = clean_filename(
-        uploaded_file.name
-    )
-
-    drive_filename = (
-        f"{user_id}_"
-        f"{uuid.uuid4()}_"
-        f"{safe_filename}"
-    )
-
-    file_bytes = uploaded_file.getvalue()
-
-    media = MediaIoBaseUpload(
-        BytesIO(file_bytes),
-        mimetype=(
-            uploaded_file.type
-            or "application/octet-stream"
-        ),
-        resumable=True,
-    )
-
-    metadata = {
-        "name": drive_filename,
-        "parents": [DRIVE_FOLDER_ID],
-    }
-
-    result = (
-        drive_service.files()
-        .create(
-            body=metadata,
-            media_body=media,
-            fields=(
-                "id,name,mimeType,size,"
-                "createdTime,webViewLink"
-            ),
-            supportsAllDrives=True,
-        )
-        .execute()
-    )
-
-    return result
-
-
-# ==================================================
-# CONFIGURATION
-# ==================================================
-
-APP_DIR = Path(__file__).resolve().parent
-DATA_DIR = APP_DIR / "data"
-UPLOAD_DIR = DATA_DIR / "uploads"
-DATABASE_PATH = DATA_DIR / "bloodlens.sqlite"
-LOGO_PATH = APP_DIR / "bloodlens-logo.png"
-
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-PAGES = [
-    "Overview",
-    "CBC trends",
-    "Smear analysis",
-    "Past reports",
-    "About and safety",
-]
-
+# ────────────────────────────────────────────────────────────────────────────
+# PAGE CONFIG
+# ────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="BloodLens AI",
     page_icon="🔬",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
+# ────────────────────────────────────────────────────────────────────────────
+# THEME / CSS
+# ────────────────────────────────────────────────────────────────────────────
+NAVY = "#0f2c3f"
+NAVY_DARK = "#0b2130"
+TEAL = "#2ec4c0"
+TEAL_DARK = "#1a8f8c"
+LIGHT_BG = "#f4f8fa"
+CARD_BG = "#ffffff"
 
-# ==================================================
-# CSS
-# ==================================================
+st.markdown(f"""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,600;1,600&family=Inter:wght@400;500;600;700&display=swap');
 
-st.html(
-    """
-    <style>
-    :root {
-        --navy: #102a43;
-        --navy-light: #173f5f;
-        --blue: #2878a7;
-        --cyan: #35a7b8;
-        --ice: #eef6f8;
-        --white: #ffffff;
-        --ink: #173042;
-        --muted: #667b88;
-        --line: #dbe5ea;
-        --success: #2d8476;
-        --warning-bg: #fff7ec;
-        --warning-border: #efd7b5;
-    }
+    html, body, [class*="css"]  {{
+        font-family: 'Inter', sans-serif;
+    }}
 
-    [data-testid="stAppViewContainer"] {
-        background:
-            radial-gradient(
-                circle at 84% 4%,
-                rgba(53, 167, 184, 0.10),
-                transparent 25%
-            ),
-            linear-gradient(
-                180deg,
-                #f8fbfc 0%,
-                #f2f7f9 100%
-            );
-    }
+    #MainMenu {{visibility: hidden;}}
+    footer {{visibility: hidden;}}
+    header {{visibility: hidden;}}
 
-    [data-testid="stHeader"] {
-        background: rgba(248, 251, 252, 0.86);
-        backdrop-filter: blur(12px);
-    }
+    .stApp {{
+        background: {LIGHT_BG};
+    }}
 
-    [data-testid="stSidebar"] {
-        background:
-            linear-gradient(
-                180deg,
-                #102a43 0%,
-                #153f59 100%
-            );
-    }
+    /* ---- Sidebar ---- */
+    section[data-testid="stSidebar"] {{
+        background: linear-gradient(180deg, {NAVY} 0%, {NAVY_DARK} 100%);
+    }}
+    section[data-testid="stSidebar"] * {{
+        color: #dce9ee !important;
+    }}
+    section[data-testid="stSidebar"] .stButton button {{
+        background: transparent;
+        border: none;
+        text-align: left;
+        width: 100%;
+        padding: 10px 14px;
+        border-radius: 8px;
+        font-weight: 500;
+        color: #cfe3e9 !important;
+    }}
+    section[data-testid="stSidebar"] .stButton button:hover {{
+        background: rgba(46, 196, 192, 0.15);
+        color: #ffffff !important;
+    }}
 
-    [data-testid="stSidebar"]::before {
-        content: "";
-        position: absolute;
-        inset: 0;
-        pointer-events: none;
-        opacity: 0.15;
-        background-image:
-            linear-gradient(
-                rgba(255,255,255,.08) 1px,
-                transparent 1px
-            ),
-            linear-gradient(
-                90deg,
-                rgba(255,255,255,.08) 1px,
-                transparent 1px
-            );
-        background-size: 30px 30px;
-        mask-image:
-            linear-gradient(
-                to bottom,
-                black,
-                transparent 70%
-            );
-    }
-
-    [data-testid="stSidebar"] * {
-        color: #dceaf0;
-    }
-
-    [data-testid="stSidebar"] h1,
-    [data-testid="stSidebar"] h2,
-    [data-testid="stSidebar"] h3 {
-        color: white !important;
-    }
-
-    .block-container {
-        max-width: 1380px;
-        padding-top: 2.2rem;
-        padding-bottom: 4rem;
-    }
-
-    h1, h2, h3 {
-        color: var(--navy);
-    }
-
-    .eyebrow {
-        color: var(--cyan);
-        font-size: 0.67rem;
-        font-weight: 800;
-        letter-spacing: 0.16em;
-        text-transform: uppercase;
-        margin-bottom: 0.4rem;
-    }
-
-    .hero {
-        position: relative;
-        overflow: hidden;
-        padding: 2rem 2.2rem;
-        margin: 1rem 0 1.4rem;
+    /* ---- Generic buttons ---- */
+    .stButton>button {{
+        background: linear-gradient(90deg, {NAVY} 0%, {TEAL} 100%);
         color: white;
-        background:
-            linear-gradient(
-                125deg,
-                #153c59 0%,
-                #1f7594 65%,
-                #35a7b8 100%
-            );
-        border-radius: 20px;
-        box-shadow:
-            0 18px 42px
-            rgba(19, 70, 96, 0.16);
-    }
-
-    .hero::after {
-        content: "";
-        position: absolute;
-        width: 270px;
-        height: 270px;
-        right: -70px;
-        top: -125px;
-        border: 1px solid
-            rgba(255,255,255,.17);
-        border-radius: 50%;
-        box-shadow:
-            0 0 0 45px
-                rgba(255,255,255,.045),
-            0 0 0 90px
-                rgba(255,255,255,.025);
-    }
-
-    .hero h2 {
-        color: white !important;
-        font-size: 2.15rem;
-        margin: 0.35rem 0 0.55rem;
-    }
-
-    .hero p {
-        max-width: 760px;
-        color: #d4e9ef;
-        line-height: 1.65;
-        margin-bottom: 0;
-    }
-
-    .login-hero {
-        min-height: 500px;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-    }
-
-    .login-hero h2 {
-        font-size: 4rem;
-        line-height: 0.98;
-    }
-
-    .clinical-card {
-        min-height: 155px;
-        padding: 1.3rem;
-        background: white;
-        border: 1px solid var(--line);
-        border-radius: 17px;
-        transition:
-            transform .2s,
-            box-shadow .2s,
-            border-color .2s;
-    }
-
-    .clinical-card:hover {
-        transform: translateY(-3px);
-        border-color: #b8dae2;
-        box-shadow:
-            0 15px 35px
-            rgba(16,42,67,.08);
-    }
-
-    .clinical-card h3 {
-        margin: 0.75rem 0 0.4rem;
-    }
-
-    .clinical-card p {
-        color: var(--muted);
-        font-size: 0.82rem;
-        line-height: 1.55;
-        margin-bottom: 0;
-    }
-
-    .step {
-        display: inline-grid;
-        place-items: center;
-        width: 35px;
-        height: 35px;
-        color: var(--blue);
-        background: #e3f2f5;
-        border-radius: 50%;
-        font-size: 0.7rem;
-        font-weight: 800;
-    }
-
-    .empty-state {
-        padding: 2.3rem 1.2rem;
-        color: var(--muted);
-        background: #f8fbfc;
-        border: 1px dashed #b9d2d9;
-        border-radius: 15px;
-        text-align: center;
-    }
-
-    .empty-state strong {
-        color: var(--navy);
-    }
-
-    .privacy-box {
-        padding: 0.9rem 1rem;
-        color: #55717e;
-        background: #edf4f6;
-        border: 1px solid #d8e7eb;
-        border-radius: 11px;
-        font-size: 0.75rem;
-        line-height: 1.6;
-    }
-
-    .safety-box {
-        padding: 0.95rem 1rem;
-        color: #79582f;
-        background: var(--warning-bg);
-        border: 1px solid var(--warning-border);
-        border-radius: 11px;
-        font-size: 0.76rem;
-        line-height: 1.6;
-    }
-
-    .status-badge {
-        display: inline-block;
-        padding: 0.35rem 0.65rem;
-        color: var(--success);
-        background: #dff2ef;
-        border-radius: 20px;
-        font-size: 0.66rem;
-        font-weight: 800;
-    }
-
-    [data-testid="stMetric"] {
-        padding: 1rem 1.1rem;
-        background: white;
-        border: 1px solid var(--line);
-        border-top: 3px solid var(--cyan);
-        border-radius: 15px;
-        box-shadow:
-            0 8px 25px
-            rgba(16,42,67,.04);
-    }
-
-    div[data-testid="stFileUploader"] {
-        padding: 0.7rem;
-        background: #f4fafb;
-        border: 1px dashed #a9cbd4;
-        border-radius: 14px;
-    }
-
-    .stButton > button,
-    .stFormSubmitButton > button {
-        border-radius: 10px;
-        font-weight: 700;
-        transition:
-            transform .2s,
-            box-shadow .2s;
-    }
-
-    .stButton > button:hover,
-    .stFormSubmitButton > button:hover {
+        border: none;
+        border-radius: 8px;
+        padding: 0.6em 1.2em;
+        font-weight: 600;
+        transition: 0.2s;
+    }}
+    .stButton>button:hover {{
+        opacity: 0.9;
         transform: translateY(-1px);
-        box-shadow:
-            0 8px 20px
-            rgba(40,120,167,.16);
-    }
-
-    @media (max-width: 700px) {
-        .block-container {
-            padding-left: 1rem;
-            padding-right: 1rem;
-        }
-
-        .hero {
-            padding: 1.5rem;
-        }
-
-        .login-hero h2 {
-            font-size: 2.8rem;
-        }
-    }
-    </style>
-    """
-)
-
-
-# ==================================================
-# DATABASE
-# ==================================================
-
-@st.cache_resource
-def get_database():
-    connection = sqlite3.connect(
-        DATABASE_PATH,
-        check_same_thread=False,
-    )
-
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA journal_mode = WAL")
-
-    connection.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id TEXT PRIMARY KEY,
-            email TEXT NOT NULL UNIQUE COLLATE NOCASE,
-            password_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS cbc_reports (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            report_date TEXT NOT NULL,
-            label TEXT NOT NULL,
-            notes TEXT,
-            source_filename TEXT,
-            wbc REAL NOT NULL,
-            rbc REAL NOT NULL,
-            hemoglobin REAL NOT NULL,
-            hematocrit REAL,
-            platelets REAL NOT NULL,
-            neutrophils REAL,
-            lymphocytes REAL,
-            mcv REAL,
-            created_at TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id)
-                REFERENCES users(id)
-                ON DELETE CASCADE
-        );
-
-        CREATE INDEX IF NOT EXISTS
-        cbc_user_date_index
-        ON cbc_reports(
-            user_id,
-            report_date DESC
-        );
-
-        CREATE TABLE IF NOT EXISTS smear_records (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            record_date TEXT NOT NULL,
-            label TEXT NOT NULL,
-            original_filename TEXT NOT NULL,
-            stored_filename TEXT NOT NULL,
-            mime_type TEXT NOT NULL,
-            size_bytes INTEGER NOT NULL,
-            analysis_status TEXT NOT NULL
-                DEFAULT 'not_configured',
-            created_at TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id)
-                REFERENCES users(id)
-                ON DELETE CASCADE
-        );
-
-        CREATE INDEX IF NOT EXISTS
-        smear_user_date_index
-        ON smear_records(
-            user_id,
-            record_date DESC
-        );
-
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT,
-            action TEXT NOT NULL,
-            entity_type TEXT,
-            entity_id TEXT,
-            created_at TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
-
-    connection.commit()
-    return connection
-
-
-db = get_database()
-
-
-def query_rows(query, parameters=()):
-    return [
-        dict(row)
-        for row in db.execute(
-            query,
-            parameters,
-        ).fetchall()
-    ]
-
-
-def audit(
-    user_id,
-    action,
-    entity_type="",
-    entity_id="",
-):
-    db.execute(
-        """
-        INSERT INTO audit_logs (
-            user_id,
-            action,
-            entity_type,
-            entity_id
-        )
-        VALUES (?, ?, ?, ?)
-        """,
-        (
-            user_id,
-            action,
-            entity_type,
-            entity_id,
-        ),
-    )
-
-    db.commit()
-
-
-# ==================================================
-# PASSWORD AUTHENTICATION
-# ==================================================
-
-def hash_password(password):
-    salt = os.urandom(16)
-
-    digest = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt,
-        600_000,
-    )
-
-    return f"{salt.hex()}${digest.hex()}"
-
-
-def verify_password(
-    password,
-    stored_password,
-):
-    try:
-        salt_hex, digest_hex = (
-            stored_password.split("$")
-        )
-
-        calculated = hashlib.pbkdf2_hmac(
-            "sha256",
-            password.encode("utf-8"),
-            bytes.fromhex(salt_hex),
-            600_000,
-        )
-
-        return hmac.compare_digest(
-            calculated,
-            bytes.fromhex(digest_hex),
-        )
-
-    except Exception:
-        return False
-
-
-def create_account(email, password):
-    email = email.strip().lower()
-
-    if "@" not in email:
-        return False, "Enter a valid email address."
-
-    if len(password) < 8:
-        return (
-            False,
-            "Password must contain at least 8 characters.",
-        )
-
-    existing = db.execute(
-        """
-        SELECT id
-        FROM users
-        WHERE email = ?
-        """,
-        (email,),
-    ).fetchone()
-
-    if existing:
-        return (
-            False,
-            "An account already exists for this email.",
-        )
-
-    user_id = str(uuid.uuid4())
-
-    db.execute(
-        """
-        INSERT INTO users (
-            id,
-            email,
-            password_hash
-        )
-        VALUES (?, ?, ?)
-        """,
-        (
-            user_id,
-            email,
-            hash_password(password),
-        ),
-    )
-
-    db.commit()
-
-    audit(
-        user_id,
-        "auth.register",
-        "user",
-        user_id,
-    )
-
-    st.session_state.user = {
-        "id": user_id,
-        "email": email,
-    }
-
-    return True, "Account created."
-
-
-def authenticate(email, password):
-    user = db.execute(
-        """
-        SELECT
-            id,
-            email,
-            password_hash
-        FROM users
-        WHERE email = ?
-        """,
-        (email.strip().lower(),),
-    ).fetchone()
-
-    if not user:
-        return False
-
-    if not verify_password(
-        password,
-        user["password_hash"],
-    ):
-        return False
-
-    st.session_state.user = {
-        "id": user["id"],
-        "email": user["email"],
-    }
-
-    audit(
-        user["id"],
-        "auth.login",
-        "user",
-        user["id"],
-    )
-
-    return True
-
-
-# ==================================================
-# NAVIGATION
-# ==================================================
-
-def navigate_to(page_name):
-    """
-    Callback used by buttons.
-
-    This runs before Streamlit reruns the page, so it
-    avoids modifying a widget key after instantiation.
-    """
-    st.session_state.current_page = page_name
-
-
-def sign_out(user_id):
-    audit(
-        user_id,
-        "auth.logout",
-        "user",
-        user_id,
-    )
-
-    st.session_state.user = None
-    st.session_state.current_page = "Overview"
-
-
-# ==================================================
-# DATA ACCESS
-# ==================================================
-
-def get_cbc_reports(user_id):
-    return query_rows(
-        """
-        SELECT *
-        FROM cbc_reports
-        WHERE user_id = ?
-        ORDER BY
-            report_date DESC,
-            created_at DESC
-        """,
-        (user_id,),
-    )
-
-
-def get_smear_records(user_id):
-    return query_rows(
-        """
-        SELECT *
-        FROM smear_records
-        WHERE user_id = ?
-        ORDER BY
-            record_date DESC,
-            created_at DESC
-        """,
-        (user_id,),
-    )
-
-
-# ==================================================
-# LOGIN
-# ==================================================
-
+    }}
+
+    /* ---- Cards ---- */
+    .bl-card {{
+        background: {CARD_BG};
+        border-radius: 14px;
+        padding: 22px 24px;
+        box-shadow: 0 2px 10px rgba(15, 44, 63, 0.06);
+        border: 1px solid #e8eef1;
+        margin-bottom: 18px;
+    }}
+    .bl-hero {{
+        background: linear-gradient(120deg, {NAVY} 0%, {TEAL_DARK} 120%);
+        border-radius: 16px;
+        padding: 32px 34px;
+        color: white;
+        margin-bottom: 24px;
+    }}
+    .bl-hero h2 {{ margin: 0 0 6px 0; }}
+    .bl-hero p {{ opacity: 0.9; margin-bottom: 0; }}
+    .bl-kicker {{
+        text-transform: uppercase;
+        letter-spacing: 1.5px;
+        font-size: 0.75em;
+        font-weight: 700;
+        color: {TEAL};
+    }}
+    .bl-metric-label {{ color: #6b7d87; font-size: 0.85em; margin-bottom: 4px; }}
+    .bl-metric-value {{ font-size: 2em; font-weight: 700; color: {NAVY}; }}
+    .bl-badge {{
+        background: #e8f7f6;
+        color: {TEAL_DARK};
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 0.75em;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+    }}
+    .bl-warning {{
+        background: #fff7ea;
+        border: 1px solid #f3dcae;
+        border-radius: 10px;
+        padding: 12px 16px;
+        font-size: 0.85em;
+        color: #6b5610;
+    }}
+    .bl-title-serif {{
+        font-family: 'Playfair Display', serif;
+        font-weight: 600;
+    }}
+</style>
+""", unsafe_allow_html=True)
+
+# ────────────────────────────────────────────────────────────────────────────
+# SESSION STATE
+# ────────────────────────────────────────────────────────────────────────────
+defaults = {
+    "authenticated": False,
+    "email": "",
+    "profession": "",
+    "page": "Overview",
+    "cbc_reports": [],   # list of dicts
+    "smear_analyses": [],  # list of dicts
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+
+def is_pathologist():
+    return st.session_state.profession == "Pathologist"
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# LOGIN PAGE
+# ────────────────────────────────────────────────────────────────────────────
 def login_page():
-    left, right = st.columns(
-        [1.15, 1],
-        gap="large",
-    )
+    left, right = st.columns([1.1, 1], gap="large")
 
     with left:
-        st.html(
-            """
-            <div class="hero login-hero">
-                <div
-                    class="eyebrow"
-                    style="color:#8ce4eb"
-                >
-                    AI-assisted screening support
+        st.markdown(f"""
+        <div style="background:linear-gradient(160deg, {NAVY} 0%, {NAVY_DARK} 100%);
+                    border-radius:18px; padding:48px 42px; height:640px; color:white;">
+            <span class="bl-badge" style="background:rgba(255,255,255,0.1); color:#bfe9e6;">
+                ● Private clinical workspace
+            </span>
+            <div class="bl-kicker" style="margin-top:36px;">AI-assisted screening support</div>
+            <h1 style="font-size:2.6em; line-height:1.15; margin:8px 0 0 0;">
+                See deeper.<br>
+                <span class="bl-title-serif" style="font-style:italic; color:{TEAL};">Track smarter.</span>
+            </h1>
+            <p style="opacity:0.85; margin-top:18px; max-width:420px;">
+                Use blood smear screening and longitudinal CBC tracking as separate
+                clinical-support tools built around professional judgment.
+            </p>
+            <div style="display:flex; gap:40px; margin-top:70px;">
+                <div>
+                    <div style="font-weight:700;">Private by design</div>
+                    <div style="opacity:0.75; font-size:0.85em;">Your prototype data stays on this device</div>
                 </div>
-
-                <h2>
-                    See deeper.<br>
-                    Track smarter.
-                </h2>
-
-                <p>
-                    Use blood smear screening and
-                    longitudinal CBC tracking as separate
-                    clinical-support tools built around
-                    professional judgment.
-                </p>
+                <div>
+                    <div style="font-weight:700;">No invented records</div>
+                    <div style="opacity:0.75; font-size:0.85em;">Charts appear only after you add data</div>
+                </div>
             </div>
-            """
-        )
+        </div>
+        """, unsafe_allow_html=True)
 
     with right:
-        if LOGO_PATH.exists():
-            st.image(
-                str(LOGO_PATH),
-                width=310,
-            )
-
-        st.html(
-            """
-            <div class="eyebrow">
-                Protected access
+        st.markdown(f"""
+        <div style="text-align:center; margin-bottom:6px;">
+            <div style="font-size:2.4em;">🔬</div>
+            <div style="font-size:1.6em; font-weight:800; color:{NAVY};">
+                BloodLens <span style="color:{TEAL_DARK};">AI</span>
             </div>
-            """
+            <div style="font-size:0.75em; letter-spacing:2px; color:#8aa1a9;">
+                SEE DEEPER · DIAGNOSE SMARTER
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown('<div class="bl-card">', unsafe_allow_html=True)
+        st.markdown(f'<span class="bl-kicker">Protected access</span>', unsafe_allow_html=True)
+        st.markdown("### Welcome to BloodLens")
+        st.caption("Sign in to your device-local clinical workspace.")
+
+        email = st.text_input("Email address", placeholder="you@example.com")
+        password = st.text_input("Password", type="password", placeholder="At least 8 characters")
+        profession = st.selectbox(
+            "What is your profession?",
+            ["Select your profession", "Pathologist", "Hematologist", "General Physician",
+             "Nurse", "Lab Technician", "Medical Student", "Other Clinician"],
         )
 
-        st.header("Welcome to BloodLens")
-
-        mode = st.radio(
-            "Access mode",
-            [
-                "Sign in",
-                "Create account",
-            ],
-            horizontal=True,
-        )
-
-        with st.form(
-            "authentication_form",
-            clear_on_submit=False,
-        ):
-            email = st.text_input(
-                "Email address",
-                placeholder="name@hospital.org",
-            )
-
-            password = st.text_input(
-                "Password",
-                type="password",
-                placeholder="At least 8 characters",
-            )
-
-            submitted = st.form_submit_button(
-                mode,
-                type="primary",
-                use_container_width=True,
-            )
-
-        if submitted:
-            if mode == "Create account":
-                success, message = create_account(
-                    email,
-                    password,
-                )
-
-                if success:
-                    st.rerun()
-                else:
-                    st.error(message)
-
+        if st.button("Sign in securely →", use_container_width=True):
+            if not email or not password:
+                st.error("Please enter an email and password.")
+            elif profession == "Select your profession":
+                st.error("Please select your profession to continue.")
             else:
-                if authenticate(
-                    email,
-                    password,
-                ):
-                    st.rerun()
-                else:
-                    st.error(
-                        "Email or password is incorrect."
-                    )
+                st.session_state.authenticated = True
+                st.session_state.email = email
+                st.session_state.profession = profession
+                st.session_state.page = "Overview"
+                st.rerun()
 
-        st.html(
-            """
-            <div class="privacy-box">
-                <b>Prototype privacy note:</b>
-                passwords are securely hashed and records
-                are separated by account. Do not enter
-                identifiable patient information until
-                approved encrypted production storage is
-                connected.
-            </div>
-            """
-        )
-
-
-# ==================================================
-# DASHBOARD
-# ==================================================
-
-def dashboard(user):
-    cbc_reports = get_cbc_reports(
-        user["id"]
-    )
-
-    smear_records = get_smear_records(
-        user["id"]
-    )
-
-    name = (
-        user["email"]
-        .split("@")[0]
-        .replace(".", " ")
-        .replace("_", " ")
-        .split()[0]
-        .title()
-    )
-
-    st.html(
-        """
-        <div class="eyebrow">
-            Clinical workspace
+        st.markdown("""
+        <div class="bl-warning" style="margin-top:14px;">
+        <b>Prototype privacy note:</b> this password gate protects data only within this
+        browser session. Production use requires a secure authentication backend,
+        encrypted database, and institutional security review.
         </div>
-        """
-    )
+        """, unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    st.title(f"Welcome, {name}.")
-    st.caption(
-        "Your overview reflects only records you add."
-    )
 
-    st.html(
-        """
-        <div class="hero">
-            <div
-                class="eyebrow"
-                style="color:#8ce4eb"
-            >
-                Two clinical-support pathways
-            </div>
-
-            <h2>
-                Choose the tool that fits your task.
-            </h2>
-
-            <p>
-                Track CBC values over time or screen a
-                smear image using a separate workflow.
-                No fabricated reports, predictions, or
-                confidence scores are included.
-            </p>
+# ────────────────────────────────────────────────────────────────────────────
+# SIDEBAR (role-based, non-overlapping)
+# ────────────────────────────────────────────────────────────────────────────
+def sidebar():
+    with st.sidebar:
+        st.markdown(f"""
+        <div style="padding: 6px 4px 18px 4px;">
+            <div style="font-size:1.3em; font-weight:800; color:white;">🔬 BloodLens <span style="color:{TEAL};">AI</span></div>
         </div>
-        """
-    )
+        """, unsafe_allow_html=True)
 
-    metric_one, metric_two, metric_three = (
-        st.columns(3)
-    )
+        if is_pathologist():
+            nav_items = ["Overview", "Smear analysis", "Past reports", "About & safety"]
+        else:
+            nav_items = ["Overview", "CBC trends", "Past reports", "About & safety"]
 
-    metric_one.metric(
-        "CBC reports",
-        len(cbc_reports),
-    )
+        for item in nav_items:
+            if st.button(item, key=f"nav_{item}", use_container_width=True):
+                st.session_state.page = item
+                st.rerun()
 
-    metric_two.metric(
-        "Smear records",
-        len(smear_records),
-    )
+        st.markdown("<div style='margin-top:280px;'></div>", unsafe_allow_html=True)
+        st.markdown(f"""
+        <div style="font-size:0.75em; color:{TEAL}; font-weight:700;">● Device-local mode</div>
+        <div style="font-size:0.72em; opacity:0.7; margin-bottom:14px;">Records are stored only in this session.</div>
+        """, unsafe_allow_html=True)
 
-    metric_three.metric(
-        "Latest CBC date",
-        (
-            cbc_reports[0]["report_date"]
-            if cbc_reports
-            else "—"
-        ),
-    )
-
-    st.subheader("Available workflows")
-
-    first, second, third = st.columns(3)
-
-    with first:
-        st.html(
-            """
-            <div class="clinical-card">
-                <span class="step">01</span>
-
-                <h3>CBC tracking</h3>
-
-                <p>
-                    Enter report values and build a
-                    longitudinal blood-value history.
-                </p>
-            </div>
-            """
-        )
-
-        st.button(
-            "Open CBC tracking →",
-            key="open_cbc",
-            use_container_width=True,
-            on_click=navigate_to,
-            args=("CBC trends",),
-        )
-
-    with second:
-        st.html(
-            """
-            <div class="clinical-card">
-                <span class="step">02</span>
-
-                <h3>Smear screening</h3>
-
-                <p>
-                    Upload a de-identified microscopy
-                    image using a separate workflow.
-                </p>
-            </div>
-            """
-        )
-
-        st.button(
-            "Open smear analysis →",
-            key="open_smear",
-            use_container_width=True,
-            on_click=navigate_to,
-            args=("Smear analysis",),
-        )
-
-    with third:
-        st.html(
-            """
-            <div class="clinical-card">
-                <span class="step">03</span>
-
-                <h3>Separate histories</h3>
-
-                <p>
-                    Review CBC and smear records
-                    independently using separate tabs.
-                </p>
-            </div>
-            """
-        )
-
-        st.button(
-            "Open past reports →",
-            key="open_reports",
-            use_container_width=True,
-            on_click=navigate_to,
-            args=("Past reports",),
-        )
-
-    st.subheader("Recent activity")
-
-    activity = [
-        {
-            "Type": "CBC",
-            "Date": item["report_date"],
-            "Label": item["label"],
-            "Created": item["created_at"],
-        }
-        for item in cbc_reports
-    ]
-
-    activity.extend(
-        {
-            "Type": "Smear",
-            "Date": item["record_date"],
-            "Label": item["label"],
-            "Created": item["created_at"],
-        }
-        for item in smear_records
-    )
-
-    activity.sort(
-        key=lambda item: item["Created"],
-        reverse=True,
-    )
-
-    if activity:
-        frame = pd.DataFrame(
-            activity[:5]
-        ).drop(
-            columns=["Created"]
-        )
-
-        st.dataframe(
-            frame,
-            hide_index=True,
-            use_container_width=True,
-        )
-
-    else:
-        st.html(
-            """
-            <div class="empty-state">
-                <strong>No reports yet</strong>
-                <br>
-                Add a CBC report or upload a smear
-                image. Nothing is pre-filled.
-            </div>
-            """
-        )
-
-
-# ==================================================
-# CBC PAGE
-# ==================================================
-
-def cbc_page(user):
-    st.html(
-        """
-        <div class="eyebrow">
-            Longitudinal blood data
-        </div>
-        """
-    )
-
-    st.title("CBC trends")
-
-    st.caption(
-        "Enter values exactly as shown on the "
-        "laboratory report."
-    )
-
-    entry_column, trend_column = st.columns(
-        [1, 1.25],
-        gap="large",
-    )
-
-    with entry_column:
-        st.subheader("Add a CBC report")
-
-        with st.form(
-            "cbc_form",
-            clear_on_submit=True,
-        ):
-            report_date = st.date_input(
-                "Report date",
-                value=date.today(),
-            )
-
-            label = st.text_input(
-                "Report label",
-                placeholder="Annual CBC",
-            )
-
-            left, right = st.columns(2)
-
-            wbc = left.number_input(
-                "WBC (×10⁹/L)",
-                min_value=0.0,
-                step=0.01,
-            )
-
-            rbc = right.number_input(
-                "RBC (×10¹²/L)",
-                min_value=0.0,
-                step=0.01,
-            )
-
-            hemoglobin = left.number_input(
-                "Hemoglobin (g/dL)",
-                min_value=0.0,
-                step=0.1,
-            )
-
-            hematocrit = right.number_input(
-                "Hematocrit (%)",
-                min_value=0.0,
-                step=0.1,
-            )
-
-            platelets = left.number_input(
-                "Platelets (×10⁹/L)",
-                min_value=0.0,
-                step=1.0,
-            )
-
-            neutrophils = right.number_input(
-                "Neutrophils (%)",
-                min_value=0.0,
-                max_value=100.0,
-                step=0.1,
-            )
-
-            lymphocytes = left.number_input(
-                "Lymphocytes (%)",
-                min_value=0.0,
-                max_value=100.0,
-                step=0.1,
-            )
-
-            mcv = right.number_input(
-                "MCV (fL)",
-                min_value=0.0,
-                step=0.1,
-            )
-
-            source_file = st.file_uploader(
-                "Source report — optional",
-                type=[
-                    "pdf",
-                    "png",
-                    "jpg",
-                    "jpeg",
-                ],
-            )
-
-            notes = st.text_area(
-                "Notes",
-                max_chars=2000,
-            )
-
-            save_report = (
-                st.form_submit_button(
-                    "Save report and update trends",
-                    type="primary",
-                    use_container_width=True,
-                )
-            )
-
-        if save_report:
-            report_id = str(uuid.uuid4())
-
-            db.execute(
-                """
-                INSERT INTO cbc_reports (
-                    id,
-                    user_id,
-                    report_date,
-                    label,
-                    notes,
-                    source_filename,
-                    wbc,
-                    rbc,
-                    hemoglobin,
-                    hematocrit,
-                    platelets,
-                    neutrophils,
-                    lymphocytes,
-                    mcv
-                )
-                VALUES (
-                    ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?
-                )
-                """,
-                (
-                    report_id,
-                    user["id"],
-                    report_date.isoformat(),
-                    (
-                        label.strip()
-                        or "CBC report"
-                    ),
-                    (
-                        notes.strip()
-                        or None
-                    ),
-                    (
-                        source_file.name
-                        if source_file
-                        else None
-                    ),
-                    wbc,
-                    rbc,
-                    hemoglobin,
-                    hematocrit,
-                    platelets,
-                    neutrophils,
-                    lymphocytes,
-                    mcv,
-                ),
-            )
-
-            db.commit()
-
-            audit(
-                user["id"],
-                "cbc.create",
-                "cbc_report",
-                report_id,
-            )
-
-            st.success("CBC report saved.")
+        if st.button("↩  Sign out", key="signout", use_container_width=True):
+            for k in defaults:
+                st.session_state[k] = defaults[k]
             st.rerun()
 
-    with trend_column:
-        st.subheader("Trend summary")
 
-        reports = list(
-            reversed(
-                get_cbc_reports(
-                    user["id"]
-                )
-            )
-        )
-
-        if not reports:
-            st.html(
-                """
-                <div class="empty-state">
-                    <strong>
-                        No trend data yet
-                    </strong>
-                    <br>
-                    Add your first CBC report to
-                    begin a longitudinal view.
-                </div>
-                """
-            )
-
-        else:
-            frame = pd.DataFrame(reports)
-
-            metric = st.selectbox(
-                "Metric",
-                [
-                    "wbc",
-                    "rbc",
-                    "hemoglobin",
-                    "platelets",
-                    "hematocrit",
-                    "neutrophils",
-                    "lymphocytes",
-                    "mcv",
-                ],
-                format_func=lambda value: (
-                    value.replace(
-                        "_",
-                        " ",
-                    ).title()
-                ),
-            )
-
-            figure = go.Figure()
-
-            figure.add_trace(
-                go.Scatter(
-                    x=frame["report_date"],
-                    y=frame[metric],
-                    mode="lines+markers",
-                    line={
-                        "color": "#2878A7",
-                        "width": 3,
-                    },
-                    marker={
-                        "size": 9,
-                        "color": "#35A7B8",
-                    },
-                    fill="tozeroy",
-                    fillcolor=(
-                        "rgba(53,167,184,.08)"
-                    ),
-                )
-            )
-
-            figure.update_layout(
-                height=350,
-                margin={
-                    "l": 15,
-                    "r": 15,
-                    "t": 20,
-                    "b": 15,
-                },
-                plot_bgcolor="white",
-                paper_bgcolor=(
-                    "rgba(0,0,0,0)"
-                ),
-                xaxis_title="Report date",
-                yaxis_title=metric.title(),
-            )
-
-            st.plotly_chart(
-                figure,
-                use_container_width=True,
-            )
-
-            st.html(
-                """
-                <div class="safety-box">
-                    <b>Trend display only:</b>
-                    values are shown exactly as
-                    entered. BloodLens does not
-                    determine whether a value is
-                    normal or abnormal.
-                </div>
-                """
-            )
-
-
-# ==================================================
-# SMEAR PAGE
-# ==================================================
-
-def smear_page(user):
-    st.html(
-        """
-        <div class="eyebrow">
-            Independent image workflow
+# ────────────────────────────────────────────────────────────────────────────
+# TOP BAR
+# ────────────────────────────────────────────────────────────────────────────
+def topbar(title):
+    c1, c2, c3 = st.columns([3, 2, 2])
+    with c1:
+        st.markdown(f"#### {title}")
+    with c3:
+        st.markdown(f"""
+        <div style="text-align:right;">
+            <span class="bl-badge">SECURE PROTOTYPE</span>
+            &nbsp;&nbsp; <span style="color:{NAVY}; font-weight:600;">🧑‍⚕️ {st.session_state.email}</span>
         </div>
-        """
-    )
-
-    st.title("Smear analysis")
-
-    st.caption(
-        "Upload a de-identified microscopy image. "
-        "CBC reports are not linked."
-    )
-
-    uploader_column, guidance_column = (
-        st.columns(
-            [1.3, 0.7],
-            gap="large",
-        )
-    )
-
-    with uploader_column:
-        uploaded_file = st.file_uploader(
-            "Blood smear image",
-            type=[
-                "jpg",
-                "jpeg",
-                "png",
-                "tif",
-                "tiff",
-            ],
-            key="smear_upload",
-        )
-
-        label = st.text_input(
-            "Record label",
-            value="Blood smear analysis",
-        )
-
-        valid_image = False
-
-        if uploaded_file:
-            try:
-                image = Image.open(
-                    uploaded_file
-                )
-
-                image.verify()
-                uploaded_file.seek(0)
-
-                display_image = Image.open(
-                    uploaded_file
-                )
-
-                st.image(
-                    display_image,
-                    caption=uploaded_file.name,
-                    use_container_width=True,
-                )
-
-                uploaded_file.seek(0)
-                valid_image = True
-
-            except Exception:
-                st.error(
-                    "The selected file could not "
-                    "be read as an image."
-                )
-
-        if st.button(
-            "Save smear record",
-            key="save_smear",
-            type="primary",
-            use_container_width=True,
-            disabled=not valid_image,
-        ):
-            payload = (
-                uploaded_file.getvalue()
-            )
-
-            if len(payload) > (
-                20 * 1024 * 1024
-            ):
-                st.error(
-                    "The image exceeds the "
-                    "20 MB limit."
-                )
-
-            else:
-                extension = (
-                    Path(
-                        uploaded_file.name
-                    )
-                    .suffix
-                    .lower()
-                )
-
-                allowed_extensions = {
-                    ".jpg",
-                    ".jpeg",
-                    ".png",
-                    ".tif",
-                    ".tiff",
-                }
-
-                if extension not in (
-                    allowed_extensions
-                ):
-                    st.error(
-                        "Unsupported image type."
-                    )
-
-                else:
-                    record_id = str(
-                        uuid.uuid4()
-                    )
-
-                    stored_filename = (
-                        f"{uuid.uuid4()}"
-                        f"{extension}"
-                    )
-
-                    stored_path = (
-                        UPLOAD_DIR
-                        / stored_filename
-                    )
-
-                    stored_path.write_bytes(
-                        payload
-                    )
-
-                    db.execute(
-                        """
-                        INSERT INTO
-                        smear_records (
-                            id,
-                            user_id,
-                            record_date,
-                            label,
-                            original_filename,
-                            stored_filename,
-                            mime_type,
-                            size_bytes
-                        )
-                        VALUES (
-                            ?, ?, ?, ?, ?,
-                            ?, ?, ?
-                        )
-                        """,
-                        (
-                            record_id,
-                            user["id"],
-                            date.today()
-                                .isoformat(),
-                            (
-                                label.strip()
-                                or
-                                "Blood smear analysis"
-                            ),
-                            Path(
-                                uploaded_file.name
-                            ).name,
-                            stored_filename,
-                            uploaded_file.type,
-                            len(payload),
-                        ),
-                    )
-
-                    db.commit()
-
-                    audit(
-                        user["id"],
-                        "smear.create",
-                        "smear_record",
-                        record_id,
-                    )
-
-                    st.success(
-                        "Smear record saved. "
-                        "No prediction was "
-                        "generated."
-                    )
-
-    with guidance_column:
-        st.html(
-            """
-            <div class="clinical-card">
-                <span class="step">01</span>
-
-                <h3>De-identify</h3>
-
-                <p>
-                    Remove patient names, accession
-                    numbers, and identifying labels
-                    before uploading.
-                </p>
-            </div>
-            """
-        )
-
-        st.html(
-            """
-            <div
-                class="clinical-card"
-                style="margin-top:16px"
-            >
-                <span class="step">02</span>
-
-                <h3>Check image quality</h3>
-
-                <p>
-                    Use even illumination, sharp
-                    focus, and visible cell
-                    morphology.
-                </p>
-            </div>
-            """
-        )
-
-        st.html(
-            """
-            <div
-                class="safety-box"
-                style="margin-top:16px"
-            >
-                <b>No diagnostic output:</b>
-                a validated model is not connected,
-                so the app stores the image without
-                producing a prediction or confidence
-                score.
-            </div>
-            """
-        )
+        """, unsafe_allow_html=True)
+    st.markdown("<hr style='margin-top:6px; margin-bottom:22px;'>", unsafe_allow_html=True)
 
 
-# ==================================================
-# REPORTS PAGE
-# ==================================================
+# ────────────────────────────────────────────────────────────────────────────
+# OVERVIEW PAGE (role aware — shows only the workflow relevant to the user)
+# ────────────────────────────────────────────────────────────────────────────
+def overview_page():
+    topbar("Overview")
+    st.markdown(f'<span class="bl-kicker">Connected clinical workspace</span>', unsafe_allow_html=True)
+    st.markdown(f"## Welcome, {st.session_state.email.split('@')[0]}.")
+    st.caption("Your overview reflects only reports you add.")
 
-def reports_page(user):
-    st.html(
-        """
-        <div class="eyebrow">
-            Saved history
+    if is_pathologist():
+        st.markdown(f"""
+        <div class="bl-hero">
+            <div class="bl-kicker" style="color:#bfe9e6;">Pathologist workspace</div>
+            <h2>Blood smear screening</h2>
+            <p>Upload de-identified microscopy images for AI-assisted screening support.
+            Results are demonstration outputs only, never a diagnosis.</p>
         </div>
-        """
+        """, unsafe_allow_html=True)
+        if st.button("Open smear analysis →"):
+            st.session_state.page = "Smear analysis"
+            st.rerun()
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown('<div class="bl-card">', unsafe_allow_html=True)
+            st.markdown('<div class="bl-metric-label">Smear analyses</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="bl-metric-value">{len(st.session_state.smear_analyses)}</div>', unsafe_allow_html=True)
+            st.caption("Created from your uploads")
+            st.markdown('</div>', unsafe_allow_html=True)
+        with c2:
+            st.markdown('<div class="bl-card">', unsafe_allow_html=True)
+            st.markdown('<div class="bl-metric-label">Latest analysis</div>', unsafe_allow_html=True)
+            latest = st.session_state.smear_analyses[-1]["date"] if st.session_state.smear_analyses else "—"
+            st.markdown(f'<div class="bl-metric-value">{latest}</div>', unsafe_allow_html=True)
+            st.caption("Updates when you add a scan")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+    else:
+        st.markdown(f"""
+        <div class="bl-hero">
+            <div class="bl-kicker" style="color:#bfe9e6;">Clinical workspace</div>
+            <h2>Longitudinal CBC tracking</h2>
+            <p>Track complete blood count values over time and compare trends across visits.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Open CBC tracking →"):
+            st.session_state.page = "CBC trends"
+            st.rerun()
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown('<div class="bl-card">', unsafe_allow_html=True)
+            st.markdown('<div class="bl-metric-label">Saved blood reports</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="bl-metric-value">{len(st.session_state.cbc_reports)}</div>', unsafe_allow_html=True)
+            st.caption("No sample data included")
+            st.markdown('</div>', unsafe_allow_html=True)
+        with c2:
+            st.markdown('<div class="bl-card">', unsafe_allow_html=True)
+            st.markdown('<div class="bl-metric-label">Latest CBC date</div>', unsafe_allow_html=True)
+            latest = st.session_state.cbc_reports[-1]["date"] if st.session_state.cbc_reports else "—"
+            st.markdown(f'<div class="bl-metric-value">{latest}</div>', unsafe_allow_html=True)
+            st.caption("Updates when you add a report")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="bl-card">', unsafe_allow_html=True)
+    st.markdown("**Need help understanding the workspace?**")
+    st.caption("See what BloodLens does, what it does not do, and how your data is handled.")
+    if st.button("Open safety guide →", key="safety_from_overview"):
+        st.session_state.page = "About & safety"
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# CBC TRENDS PAGE (non-pathologists only)
+# ────────────────────────────────────────────────────────────────────────────
+def cbc_page():
+    topbar("CBC trends")
+    st.markdown('<span class="bl-kicker">Longitudinal tracking</span>', unsafe_allow_html=True)
+    st.markdown("## Build your CBC history")
+    st.caption("Add results below. Nothing is pre-filled — charts populate only from what you enter.")
+
+    with st.expander("➕ Add a new CBC report", expanded=len(st.session_state.cbc_reports) == 0):
+        with st.form("cbc_form", clear_on_submit=True):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                rdate = st.date_input("Report date", value=date.today())
+                wbc = st.number_input("WBC (×10⁹/L)", min_value=0.0, max_value=50.0, value=7.0, step=0.1)
+            with c2:
+                rbc = st.number_input("RBC (×10¹²/L)", min_value=0.0, max_value=8.0, value=4.8, step=0.1)
+                hgb = st.number_input("Hemoglobin (g/dL)", min_value=0.0, max_value=25.0, value=13.5, step=0.1)
+            with c3:
+                hct = st.number_input("Hematocrit (%)", min_value=0.0, max_value=65.0, value=40.0, step=0.1)
+                plt_ = st.number_input("Platelets (×10⁹/L)", min_value=0.0, max_value=900.0, value=250.0, step=1.0)
+
+            submitted = st.form_submit_button("Save CBC report")
+            if submitted:
+                st.session_state.cbc_reports.append({
+                    "date": rdate.isoformat(), "WBC": wbc, "RBC": rbc,
+                    "Hemoglobin": hgb, "Hematocrit": hct, "Platelets": plt_,
+                })
+                st.success("CBC report saved.")
+                st.rerun()
+
+    if not st.session_state.cbc_reports:
+        st.markdown('<div class="bl-card" style="text-align:center; color:#7c8b93;">No CBC reports yet. Add one above to see trends.</div>', unsafe_allow_html=True)
+        return
+
+    df = pd.DataFrame(st.session_state.cbc_reports).sort_values("date")
+    metric = st.selectbox("Metric to chart", ["WBC", "RBC", "Hemoglobin", "Hematocrit", "Platelets"])
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df["date"], y=df[metric], mode="lines+markers",
+        line=dict(color=TEAL_DARK, width=3), marker=dict(size=9, color=NAVY),
+        fill="tozeroy", fillcolor="rgba(46,196,192,0.12)",
+    ))
+    fig.update_layout(
+        height=380, margin=dict(l=10, r=10, t=20, b=10),
+        plot_bgcolor="white", paper_bgcolor="white",
+        xaxis_title="Date", yaxis_title=metric,
     )
+    st.markdown('<div class="bl-card">', unsafe_allow_html=True)
+    st.plotly_chart(fig, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    st.title("Past reports")
-
-    st.caption(
-        "CBC reports and smear records "
-        "remain separate."
-    )
-
-    cbc_tab, smear_tab = st.tabs(
-        [
-            "CBC reports",
-            "Smear records",
-        ]
-    )
-
-    with cbc_tab:
-        reports = get_cbc_reports(
-            user["id"]
-        )
-
-        if not reports:
-            st.html(
-                """
-                <div class="empty-state">
-                    <strong>
-                        No CBC reports
-                    </strong>
-                    <br>
-                    Add a report from CBC Trends.
-                </div>
-                """
-            )
-
-        for report in reports:
-            title = (
-                f"{report['report_date']} · "
-                f"{report['label']}"
-            )
-
-            with st.expander(title):
-                frame = pd.DataFrame(
-                    [
-                        {
-                            "WBC": report["wbc"],
-                            "RBC": report["rbc"],
-                            "Hemoglobin": (
-                                report[
-                                    "hemoglobin"
-                                ]
-                            ),
-                            "Hematocrit": (
-                                report[
-                                    "hematocrit"
-                                ]
-                            ),
-                            "Platelets": (
-                                report[
-                                    "platelets"
-                                ]
-                            ),
-                            "Neutrophils": (
-                                report[
-                                    "neutrophils"
-                                ]
-                            ),
-                            "Lymphocytes": (
-                                report[
-                                    "lymphocytes"
-                                ]
-                            ),
-                            "MCV": report["mcv"],
-                        }
-                    ]
-                )
-
-                st.dataframe(
-                    frame,
-                    hide_index=True,
-                    use_container_width=True,
-                )
-
-                if report["notes"]:
-                    st.write(
-                        "**Notes:**",
-                        report["notes"],
-                    )
-
-                if st.button(
-                    "Delete CBC report",
-                    key=(
-                        "delete_cbc_"
-                        f"{report['id']}"
-                    ),
-                ):
-                    db.execute(
-                        """
-                        DELETE FROM
-                        cbc_reports
-                        WHERE
-                            id = ?
-                            AND user_id = ?
-                        """,
-                        (
-                            report["id"],
-                            user["id"],
-                        ),
-                    )
-
-                    db.commit()
-
-                    audit(
-                        user["id"],
-                        "cbc.delete",
-                        "cbc_report",
-                        report["id"],
-                    )
-
-                    st.rerun()
-
-    with smear_tab:
-        records = get_smear_records(
-            user["id"]
-        )
-
-        if not records:
-            st.html(
-                """
-                <div class="empty-state">
-                    <strong>
-                        No smear records
-                    </strong>
-                    <br>
-                    Upload an image from
-                    Smear Analysis.
-                </div>
-                """
-            )
-
-        for record in records:
-            title = (
-                f"{record['record_date']} · "
-                f"{record['label']}"
-            )
-
-            with st.expander(title):
-                image_path = (
-                    UPLOAD_DIR
-                    / record[
-                        "stored_filename"
-                    ]
-                )
-
-                if image_path.exists():
-                    st.image(
-                        str(image_path),
-                        use_container_width=True,
-                    )
-
-                st.html(
-                    """
-                    <span class="status-badge">
-                        No model configured
-                    </span>
-                    """
-                )
-
-                st.caption(
-                    "Original file: "
-                    f"{record['original_filename']}"
-                )
-
-                if st.button(
-                    "Delete smear record",
-                    key=(
-                        "delete_smear_"
-                        f"{record['id']}"
-                    ),
-                ):
-                    db.execute(
-                        """
-                        DELETE FROM
-                        smear_records
-                        WHERE
-                            id = ?
-                            AND user_id = ?
-                        """,
-                        (
-                            record["id"],
-                            user["id"],
-                        ),
-                    )
-
-                    db.commit()
-
-                    image_path.unlink(
-                        missing_ok=True
-                    )
-
-                    audit(
-                        user["id"],
-                        "smear.delete",
-                        "smear_record",
-                        record["id"],
-                    )
-
-                    st.rerun()
+    st.markdown("#### Report history")
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
 
-# ==================================================
-# ABOUT PAGE
-# ==================================================
+# ────────────────────────────────────────────────────────────────────────────
+# SMEAR ANALYSIS PAGE (pathologists only)
+# ────────────────────────────────────────────────────────────────────────────
+def smear_page():
+    topbar("Smear analysis")
+    st.markdown('<span class="bl-kicker">New screening</span>', unsafe_allow_html=True)
+    st.markdown("## Analyze a blood smear")
+    st.caption("Upload a de-identified microscopy image. Smear analysis remains separate from CBC tracking.")
 
+    st.markdown('<div class="bl-card">', unsafe_allow_html=True)
+    uploaded = st.file_uploader("Drop a blood smear image here, or click to browse", type=["jpg", "jpeg", "png", "tiff"])
+    if uploaded:
+        st.image(uploaded, caption=uploaded.name, use_container_width=True)
+
+    if st.button("Run demonstration analysis →", use_container_width=True):
+        with st.spinner("Running demonstration analysis..."):
+            demo_findings = random.choice([
+                "Predominantly normocytic, normochromic red cells observed (demo mode).",
+                "Mild anisocytosis noted in this sample field (demo mode).",
+                "No overt schistocytes detected in the reviewed field (demo mode).",
+                "Platelet clumping observed near the smear feather edge (demo mode).",
+            ])
+            record = {
+                "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "filename": uploaded.name if uploaded else "demo-sample.png",
+                "finding": demo_findings,
+            }
+            st.session_state.smear_analyses.append(record)
+        st.success(f"Demonstration analysis complete: {demo_findings}")
+
+    st.markdown("""
+    <div class="bl-warning" style="margin-top:14px;">
+    <b>Not a diagnosis:</b> the image result is a mock interface response until a validated
+    model API is connected. No clinical claims are generated.
+    </div>
+    """, unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if st.session_state.smear_analyses:
+        st.markdown("#### Recent analyses")
+        st.dataframe(pd.DataFrame(st.session_state.smear_analyses), use_container_width=True, hide_index=True)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# PAST REPORTS PAGE (role-scoped, non-overlapping)
+# ────────────────────────────────────────────────────────────────────────────
+def past_reports_page():
+    topbar("Past reports")
+    st.markdown('<span class="bl-kicker">Your saved history</span>', unsafe_allow_html=True)
+    st.markdown("## Past reports")
+    st.caption("Each profession sees only its own workflow history — CBC and smear records are never mixed.")
+
+    if is_pathologist():
+        data = st.session_state.smear_analyses
+        label = "smear analyses"
+    else:
+        data = st.session_state.cbc_reports
+        label = "CBC reports"
+
+    st.markdown('<div class="bl-card">', unsafe_allow_html=True)
+    if not data:
+        st.markdown(f"""
+        <div style="text-align:center; padding:30px;">
+            <div style="font-weight:700; font-size:1.1em;">No reports yet</div>
+            <div style="color:#7c8b93; margin-top:4px;">Your saved {label} will appear here.</div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# ABOUT & SAFETY PAGE
+# ────────────────────────────────────────────────────────────────────────────
 def about_page():
-    st.html(
-        """
-        <div class="eyebrow">
-            Trust and transparency
-        </div>
-        """
-    )
+    topbar("About & safety")
+    st.markdown('<span class="bl-kicker">Trust & transparency</span>', unsafe_allow_html=True)
+    st.markdown("## Support clinical judgment, never replace it.")
+    st.caption("This is an interactive prototype. It does not currently include validated diagnostics, "
+               "production authentication, or cloud medical-record storage.")
 
-    st.title(
-        "Support clinical judgment, "
-        "never replace it."
-    )
-
-    st.caption(
-        "BloodLens is a clinical-support "
-        "prototype, not a validated medical device."
-    )
-
-    first, second, third = st.columns(3)
-
-    with first:
-        st.html(
-            """
-            <div class="clinical-card">
-                <span class="step">01</span>
-
-                <h3>Real input only</h3>
-
-                <p>
-                    Counts, history, and charts
-                    begin empty and update only
-                    from information you enter.
-                </p>
+    c1, c2, c3 = st.columns(3)
+    cards = [
+        ("01", "Real input only", "Dashboard counts, report history, and charts begin empty and update only from information you enter."),
+        ("02", "Separate workflows", "CBC tracking and smear screening remain independent tools, each with its own records and purpose."),
+        ("03", "Safety boundary", "No result is a diagnosis. A production version requires validated models, secure backend authentication, encryption, auditing, and regulatory review."),
+    ]
+    for col, (num, title, body) in zip([c1, c2, c3], cards):
+        with col:
+            st.markdown(f"""
+            <div class="bl-card" style="height:190px;">
+                <div class="bl-kicker">{num}</div>
+                <div style="font-weight:700; font-size:1.1em; margin:6px 0;">{title}</div>
+                <div style="color:#6b7d87; font-size:0.88em;">{body}</div>
             </div>
-            """
-        )
+            """, unsafe_allow_html=True)
 
-    with second:
-        st.html(
-            """
-            <div class="clinical-card">
-                <span class="step">02</span>
-
-                <h3>Separate workflows</h3>
-
-                <p>
-                    CBC tracking and smear
-                    screening remain independent
-                    tools with separate histories.
-                </p>
-            </div>
-            """
-        )
-
-    with third:
-        st.html(
-            """
-            <div class="clinical-card">
-                <span class="step">03</span>
-
-                <h3>Safety boundary</h3>
-
-                <p>
-                    No result is a diagnosis.
-                    Qualified clinical review
-                    remains essential.
-                </p>
-            </div>
-            """
-        )
-
-    st.subheader(
-        "Frequently asked questions"
-    )
-
-    with st.expander(
-        "Where is data stored?"
-    ):
-        st.write(
-            "This version stores data in a "
-            "SQLite database and saves smear "
-            "images to local app storage."
-        )
-
-    with st.expander(
-        "Are CBC and smear records connected?"
-    ):
-        st.write(
-            "No. They are separate workflows "
-            "and neither record type references "
-            "the other."
-        )
-
-    with st.expander(
-        "Does BloodLens diagnose leukemia?"
-    ):
-        st.write(
-            "No. No validated model is connected "
-            "and the app does not generate "
-            "predictions or confidence scores."
-        )
+    with st.expander("Are CBC and smear records connected?"):
+        st.write("No. By design, CBC tracking and smear analysis are kept as fully separate "
+                 "workflows and histories, matched to the reviewing professional's role.")
+    with st.expander("Where is prototype data stored?"):
+        st.write("In this session's memory only. Nothing is written to a persistent database "
+                 "or sent to external storage.")
+    with st.expander("Does BloodLens provide a diagnosis?"):
+        st.write("No. All outputs are demonstration or informational support only, intended "
+                 "to sit alongside — never replace — professional clinical judgment.")
 
 
-# ==================================================
-# SESSION INITIALIZATION
-# ==================================================
+# ────────────────────────────────────────────────────────────────────────────
+# ROUTER
+# ────────────────────────────────────────────────────────────────────────────
+def main():
+    if not st.session_state.authenticated:
+        login_page()
+        return
 
-if "user" not in st.session_state:
-    st.session_state.user = None
+    # Guard: keep workflows from overlapping if role changes or a stale page is set
+    allowed = (["Overview", "Smear analysis", "Past reports", "About & safety"]
+               if is_pathologist() else
+               ["Overview", "CBC trends", "Past reports", "About & safety"])
+    if st.session_state.page not in allowed:
+        st.session_state.page = "Overview"
 
-if "current_page" not in st.session_state:
-    st.session_state.current_page = "Overview"
+    sidebar()
 
-
-# ==================================================
-# LOGIN GATE
-# ==================================================
-
-if not st.session_state.user:
-    login_page()
-    st.stop()
-
-
-# ==================================================
-# AUTHENTICATED APPLICATION
-# ==================================================
-
-user = st.session_state.user
-
-with st.sidebar:
-    st.markdown("## BloodLens AI")
-    st.caption("Clinical-support prototype")
-
-    st.divider()
-
-    for page_name in PAGES:
-        is_active = (
-            st.session_state.current_page
-            == page_name
-        )
-
-        st.button(
-            page_name,
-            key=f"nav_{page_name}",
-            type=(
-                "primary"
-                if is_active
-                else "secondary"
-            ),
-            use_container_width=True,
-            on_click=navigate_to,
-            args=(page_name,),
-        )
-
-    st.divider()
-
-    st.caption(user["email"])
-
-    st.html(
-        """
-        <span class="status-badge">
-            ● Local database mode
-        </span>
-        """
-    )
-
-    st.button(
-        "Sign out",
-        key="sign_out",
-        use_container_width=True,
-        on_click=sign_out,
-        args=(user["id"],),
-    )
+    routes = {
+        "Overview": overview_page,
+        "CBC trends": cbc_page,
+        "Smear analysis": smear_page,
+        "Past reports": past_reports_page,
+        "About & safety": about_page,
+    }
+    routes[st.session_state.page]()
 
 
-# ==================================================
-# PAGE ROUTER
-# ==================================================
-
-current_page = st.session_state.current_page
-
-if current_page == "Overview":
-    dashboard(user)
-
-elif current_page == "CBC trends":
-    cbc_page(user)
-
-elif current_page == "Smear analysis":
-    smear_page(user)
-
-elif current_page == "Past reports":
-    reports_page(user)
-
-else:
-    about_page()
+if __name__ == "__main__":
+    main()
