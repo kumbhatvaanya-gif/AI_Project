@@ -6,11 +6,7 @@ import random
 import numpy as np
 from PIL import Image
 import tensorflow as tf
-
-# --- ADD THE DEBUGGING LINES RIGHT HERE ---
 import os
-st.error(f"The server sees these files: {os.listdir('.')}")
-# ------------------------------------------
 
 # ────────────────────────────────────────────────────────────────────────────
 # AI MODEL CONFIGURATION & INITIALIZATION
@@ -473,29 +469,39 @@ def smear_page():
     st.markdown('<div class="bl-card">', unsafe_allow_html=True)
     uploaded = st.file_uploader("Drop a blood smear image here, or click to browse", type=["jpg", "jpeg", "png", "tiff"])
     if uploaded:
-        st.image(uploaded, caption=uploaded.name, use_container_width=True)
+        # Changed this from use_container_width=True to a fixed width so it isn't massive
+        st.image(uploaded, caption=uploaded.name, width=350)
 
-    # Added disabled state so the user must upload an image first
     if st.button("Run demonstration analysis →", use_container_width=True, disabled=not uploaded):
         with st.spinner("Analyzing cell morphology..."):
             
-            # 1. Load the interpreter
-            interpreter = load_tflite_model()
-            
-            # 2. Run the actual inference
-            predicted_class, confidence = predict_smear(uploaded, interpreter)
-            
-            # 3. Format the result
-            analysis_result = f"Detected pattern consistent with {predicted_class} (Confidence: {confidence:.1%})."
-            
-            record = {
-                "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "filename": uploaded.name,
-                "finding": analysis_result,
-            }
-            st.session_state.smear_analyses.append(record)
-            
-        st.success(f"Analysis complete: {analysis_result}")
+            try:
+                # 1. Load the interpreter safely
+                interpreter = load_tflite_model()
+                
+                # 2. Run the actual inference
+                predicted_class, confidence = predict_smear(uploaded, interpreter)
+                
+                # 3. Format the result
+                analysis_result = f"Detected pattern consistent with {predicted_class} (Confidence: {confidence:.1%})."
+                
+                record = {
+                    "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "filename": uploaded.name,
+                    "finding": analysis_result,
+                }
+                st.session_state.smear_analyses.append(record)
+                
+                st.success(f"Analysis complete: {analysis_result}")
+                
+            except Exception as e:
+                # Validation check catches and prints the error dynamically
+                st.error("Model Error: Failed to load or run 'model.tflite'.")
+                st.error(f"System Details: {str(e)}")
+                
+                # Prints out exactly what the server sees to help you debug file paths
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                st.info(f"The server sees these files in the current directory: {os.listdir(current_dir)}")
 
     st.markdown("""
     <div class="bl-warning" style="margin-top:14px;">
