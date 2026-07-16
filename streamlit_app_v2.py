@@ -20,9 +20,15 @@ IMG_SIZE = (128, 128)
 
 @st.cache_resource
 def load_tflite_model():
-# ... the rest of your code continues normally below
     """Loads the TFLite model into global cache so it isn't reloaded on every click."""
-    interpreter = tf.lite.Interpreter(model_path="model.tflite")
+    # 1. Dynamically find the exact folder this script is sitting in
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # 2. Attach the model name to that exact folder path
+    model_filepath = os.path.join(current_dir, "model.tflite")
+    
+    # 3. Load the model using the bulletproof absolute path
+    interpreter = tf.lite.Interpreter(model_path=model_filepath)
     interpreter.allocate_tensors()
     return interpreter
 
