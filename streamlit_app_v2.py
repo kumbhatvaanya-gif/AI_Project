@@ -7,6 +7,11 @@ import numpy as np
 from PIL import Image
 import tensorflow as tf
 
+# --- ADD THE DEBUGGING LINES RIGHT HERE ---
+import os
+st.error(f"The server sees these files: {os.listdir('.')}")
+# ------------------------------------------
+
 # ────────────────────────────────────────────────────────────────────────────
 # AI MODEL CONFIGURATION & INITIALIZATION
 # ────────────────────────────────────────────────────────────────────────────
@@ -15,6 +20,7 @@ IMG_SIZE = (128, 128)
 
 @st.cache_resource
 def load_tflite_model():
+# ... the rest of your code continues normally below
     """Loads the TFLite model into global cache so it isn't reloaded on every click."""
     interpreter = tf.lite.Interpreter(model_path="model.tflite")
     interpreter.allocate_tensors()
